@@ -188,52 +188,64 @@ func withCORS(conf *Conf, handler http.Handler) http.Handler {
 	return c.Handler(handler)
 }
 
-func handleUnknownServices(_ any, stream grpc.ServerStream) error {
-	errFn := func(msg string) error {
-		return status.Errorf(codes.Unimplemented, "%s", msg) //nolint:govet
-	}
+func handleUnknownServices(conf *Conf) func(any, grpc.ServerStream) error {
+	return func(_ any, stream grpc.ServerStream) error {
+		errFn := func(msg string) error {
+			return status.Errorf(codes.Unimplemented, "%s", msg) //nolint:govet
+		}
 
-	method, ok := grpc.MethodFromServerStream(stream)
-	if !ok {
+		method, ok := grpc.MethodFromServerStream(stream)
+		if !ok {
+			return errFn(unknownSvc)
+		}
+
+		parts := strings.Split(method, "/")
+		if len(parts) < 2 { //nolint:mnd
+			return errFn(unknownSvc)
+		}
+
+		switch parts[1] {
+		case svcv1.CerbosAdminService_ServiceDesc.ServiceName:
+			if !conf.AdminAPI.Enabled {
+				return errFn(adminSvcDisabled)
+			}
+		case svcv1.CerbosPlaygroundService_ServiceDesc.ServiceName:
+			if !conf.PlaygroundEnabled {
+				return errFn(playgroundSvcDisabled)
+			}
+		}
+
 		return errFn(unknownSvc)
 	}
-
-	parts := strings.Split(method, "/")
-	if len(parts) < 2 { //nolint:mnd
-		return errFn(unknownSvc)
-	}
-
-	switch parts[1] {
-	case svcv1.CerbosAdminService_ServiceDesc.ServiceName:
-		return errFn(adminSvcDisabled)
-	case svcv1.CerbosPlaygroundService_ServiceDesc.ServiceName:
-		return errFn(playgroundSvcDisabled)
-	}
-
-	return errFn(unknownSvc)
 }
 
-func handleRoutingError(ctx context.Context, mux *runtime.ServeMux, marshaler runtime.Marshaler, w http.ResponseWriter, r *http.Request, httpStatus int) {
-	if httpStatus == http.StatusNotFound && r != nil && r.URL != nil {
-		errHandler := func(msg string) {
-			err := &runtime.HTTPStatusError{
-				HTTPStatus: httpStatus,
-				Err:        status.Errorf(codes.Unimplemented, "%s", msg), //nolint:govet
+func handleRoutingError(conf *Conf) func(context.Context, *runtime.ServeMux, runtime.Marshaler, http.ResponseWriter, *http.Request, int) {
+	return func(ctx context.Context, mux *runtime.ServeMux, marshaler runtime.Marshaler, w http.ResponseWriter, r *http.Request, httpStatus int) {
+		if httpStatus == http.StatusNotFound && r != nil && r.URL != nil {
+			errHandler := func(msg string) {
+				err := &runtime.HTTPStatusError{
+					HTTPStatus: httpStatus,
+					Err:        status.Errorf(codes.Unimplemented, "%s", msg), //nolint:govet
+				}
+				runtime.DefaultHTTPErrorHandler(ctx, mux, marshaler, w, r, err)
 			}
-			runtime.DefaultHTTPErrorHandler(ctx, mux, marshaler, w, r, err)
+
+			switch {
+			case strings.HasPrefix(r.URL.Path, adminEndpoint):
+				if !conf.AdminAPI.Enabled {
+					errHandler(adminSvcDisabled)
+					return
+				}
+			case strings.HasPrefix(r.URL.Path, playgroundEndpoint):
+				if !conf.PlaygroundEnabled {
+					errHandler(playgroundSvcDisabled)
+					return
+				}
+			}
 		}
 
-		switch {
-		case strings.HasPrefix(r.URL.Path, adminEndpoint):
-			errHandler(adminSvcDisabled)
-			return
-		case strings.HasPrefix(r.URL.Path, playgroundEndpoint):
-			errHandler(playgroundSvcDisabled)
-			return
-		}
+		runtime.DefaultRoutingErrorHandler(ctx, mux, marshaler, w, r, httpStatus)
 	}
-
-	runtime.DefaultRoutingErrorHandler(ctx, mux, marshaler, w, r, httpStatus)
 }
 
 func cerbosVersionUnaryServerInterceptor(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {

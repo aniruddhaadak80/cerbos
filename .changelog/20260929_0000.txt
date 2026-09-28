@@ -1,0 +1,2 @@
+type:fix
+Return "Unknown service" error instead of "service is disabled" when an enabled service receives a request for a non-existent RPC

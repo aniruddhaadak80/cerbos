@@ -43,7 +43,7 @@ func TestPeerFromContext(t *testing.T) {
 		req.Header.Add("X-Forwarded-For", "3.3.3.3")
 		req.RemoteAddr = "4.4.4.4:12345"
 
-		ctx, err := gateway.AnnotateIncomingContext(t.Context(), mkGatewayMux(nil), req, "example.Service/Method")
+		ctx, err := gateway.AnnotateIncomingContext(t.Context(), mkGatewayMux(nil, &Conf{}), req, "example.Service/Method")
 		require.NoError(t, err)
 
 		peer := audit.PeerFromContext(ctx)

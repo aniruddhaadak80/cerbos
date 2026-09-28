@@ -387,7 +387,7 @@ func (s *Server) mkGRPCServer(log *zap.Logger, core *CoreComponents) (*grpc.Serv
 		grpc.MaxConcurrentStreams(s.conf.Advanced.GRPC.MaxConcurrentStreams),
 		grpc.ConnectionTimeout(s.conf.Advanced.GRPC.ConnectionTimeout),
 		grpc.MaxRecvMsgSize(int(s.conf.Advanced.GRPC.MaxRecvMsgSizeBytes)),
-		grpc.UnknownServiceHandler(handleUnknownServices),
+		grpc.UnknownServiceHandler(handleUnknownServices(s.conf)),
 	}
 
 	return grpc.NewServer(opts...), nil
@@ -401,7 +401,7 @@ func (s *Server) startHTTPServer(ctx context.Context, l net.Listener, grpcSrv *g
 		return nil, err
 	}
 
-	gwmux := mkGatewayMux(grpcConn)
+	gwmux := mkGatewayMux(grpcConn, s.conf)
 
 	if err := svcv1.RegisterCerbosServiceHandler(ctx, gwmux, grpcConn); err != nil {
 		log.Errorw("Failed to register Cerbos HTTP service", "error", err)
@@ -492,7 +492,7 @@ func (s *Server) startHTTPServer(ctx context.Context, l net.Listener, grpcSrv *g
 	return h, nil
 }
 
-func mkGatewayMux(grpcConn grpc.ClientConnInterface) *grpcruntime.ServeMux {
+func mkGatewayMux(grpcConn grpc.ClientConnInterface, conf *Conf) *grpcruntime.ServeMux {
 	return grpcruntime.NewServeMux(
 		grpcruntime.WithForwardResponseOption(customHTTPResponseCode),
 		grpcruntime.WithIncomingHeaderMatcher(incomingHeaderMatcher),
@@ -504,7 +504,7 @@ func mkGatewayMux(grpcConn grpc.ClientConnInterface) *grpcruntime.ServeMux {
 			DiscardUnknown: false,
 		}),
 		grpcruntime.WithMetadata(setPeerMetadata),
-		grpcruntime.WithRoutingErrorHandler(handleRoutingError),
+		grpcruntime.WithRoutingErrorHandler(handleRoutingError(conf)),
 		grpcruntime.WithHealthEndpointAt(healthpb.NewHealthClient(grpcConn), healthEndpoint),
 	)
 }

@@ -16,6 +16,7 @@ import (
 	"go.uber.org/multierr"
 	exprpb "google.golang.org/genproto/googleapis/api/expr/v1alpha1"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	enginev1 "github.com/cerbos/cerbos/api/genpb/cerbos/engine/v1"
@@ -625,6 +626,145 @@ func normaliseFilter(filter *enginev1.PlanResourcesFilter) *enginev1.PlanResourc
 	return filter
 }
 
+func operandExpr(op *enginev1.PlanResourcesFilter_Expression_Operand) *enginev1.PlanResourcesFilter_Expression {
+	if op == nil {
+		return nil
+	}
+
+	if e, ok := op.Node.(*exprOpExpr); ok {
+		return e.Expression
+	}
+
+	return nil
+}
+
+func operandValue(op *enginev1.PlanResourcesFilter_Expression_Operand) *structpb.Value {
+	if op == nil {
+		return nil
+	}
+
+	if v, ok := op.Node.(*exprOpValue); ok {
+		return v.Value
+	}
+
+	return nil
+}
+
+// equalityClass returns a coarse classification of a constant operand, used to
+// decide whether two constants may be compared for inequality. A blank result
+// means the value cannot be reasoned about safely.
+//
+// Values belonging to different classes are never reported as contradictory
+// because CEL raises a type error for those comparisons rather than evaluating
+// them to false. Null is the exception: it never equals a non-null value.
+func equalityClass(v *structpb.Value) string {
+	if v == nil {
+		return "null"
+	}
+
+	switch v.Kind.(type) {
+	case *structpb.Value_NullValue:
+		return "null"
+	case *structpb.Value_NumberValue:
+		return "number"
+	case *structpb.Value_StringValue:
+		return "string"
+	case *structpb.Value_BoolValue:
+		return "bool"
+	case *structpb.Value_StructValue:
+		return "struct"
+	case *structpb.Value_ListValue:
+		return "list"
+	}
+
+	return ""
+}
+
+// constantsDiffer reports whether two constant operands are guaranteed to
+// evaluate as unequal, so that no value of the constrained subject can satisfy
+// both comparisons.
+func constantsDiffer(a, b *structpb.Value) bool {
+	classA, classB := equalityClass(a), equalityClass(b)
+	if classA == "" || classB == "" {
+		return false
+	}
+
+	if classA != classB {
+		// Only null is comparable against every other class without a type error.
+		return classA == "null" || classB == "null"
+	}
+
+	return !proto.Equal(a, b)
+}
+
+// hasContradiction reports whether the operands of a conjunction can never all
+// hold at the same time. Two shapes are recognised:
+//
+//  1. An operand and its own negation both appear, for example
+//     (not A) && A.
+//  2. Two equality comparisons constrain the same subject to constants that
+//     cannot be equal, for example dept == "a" && dept == "b".
+//
+// Both deductions are exact, so a conjunction exhibiting either one is always
+// false and the caller may replace it with a literal false.
+func hasContradiction(operands []*enginev1.PlanResourcesFilter_Expression_Operand) bool {
+	if len(operands) < 2 {
+		return false
+	}
+
+	// Shape 1: an operand appears together with its negation.
+	present := make(map[uint64]struct{}, len(operands))
+	for _, op := range operands {
+		present[util.HashPB(op, nil)] = struct{}{}
+	}
+
+	for _, op := range operands {
+		expr := operandExpr(op)
+		if expr == nil || expr.Operator != Not || len(expr.Operands) != 1 {
+			continue
+		}
+
+		if _, ok := present[util.HashPB(expr.Operands[0], nil)]; ok {
+			return true
+		}
+	}
+
+	// Shape 2: the same subject compared against different constants.
+	bySubject := make(map[uint64][]*structpb.Value, len(operands))
+	for _, op := range operands {
+		expr := operandExpr(op)
+		if expr == nil || expr.Operator != Equals || len(expr.Operands) != 2 {
+			continue
+		}
+
+		lhs, rhs := expr.Operands[0], expr.Operands[1]
+		var subject *enginev1.PlanResourcesFilter_Expression_Operand
+		var value *structpb.Value
+
+		switch {
+		case operandValue(rhs) != nil && operandValue(lhs) == nil:
+			subject, value = lhs, operandValue(rhs)
+		case operandValue(lhs) != nil && operandValue(rhs) == nil:
+			subject, value = rhs, operandValue(lhs)
+		}
+
+		if subject == nil {
+			continue
+		}
+
+		hash := util.HashPB(subject, nil)
+		for _, previous := range bySubject[hash] {
+			if constantsDiffer(previous, value) {
+				return true
+			}
+		}
+
+		bySubject[hash] = append(bySubject[hash], value)
+	}
+
+	return false
+}
+
 func normaliseFilterExprOp(cond *enginev1.PlanResourcesFilter_Expression_Operand) *enginev1.PlanResourcesFilter_Expression_Operand {
 	if cond == nil {
 		return nil
@@ -708,6 +848,13 @@ func normaliseFilterExprOpExpr(expr *enginev1.PlanResourcesFilter_Expression_Ope
 		}
 
 		operands = append(operands, normalOp)
+	}
+
+	// A conjunction whose operands can never all hold is always false. Detecting
+	// this collapses contradictions such as (not A) && A, and lets the enclosing
+	// NOT reduce to true, which in turn lets the surrounding AND drop it.
+	if logicalOperator == And && hasContradiction(operands) {
+		return falseExprOpValue
 	}
 
 	// AND or OR of a single value is the value itself

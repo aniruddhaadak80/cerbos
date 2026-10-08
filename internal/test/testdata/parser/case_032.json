@@ -1,0 +1,13 @@
+{
+    "description": "Resource policy with an unquoted wildcard as the last element of a flow sequence",
+    "wantErrors": [
+        {
+            "kind": "KIND_PARSE_ERROR",
+            "position": {
+                "line": 8,
+                "column": 25
+            },
+            "message": "invalid YAML wildcard: quote wildcards as \"*\" to use them as string values"
+        }
+    ]
+}

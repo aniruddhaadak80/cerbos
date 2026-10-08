@@ -238,7 +238,7 @@ func parse(contents []byte, detectProblems bool) (_ *ast.File, outErr error) {
 
 	t := lexer.Tokenize(unsafe.String(unsafe.SliceData(contents), len(contents)))
 	if detectProblems && !isJSON(contents) {
-		if errs := detectStringStartingWithQuote(t); len(errs) > 0 {
+		if errs := slices.Concat(detectStringStartingWithQuote(t), detectUnquotedWildcard(t)); len(errs) > 0 {
 			for _, err := range errs {
 				outErr = errors.Join(outErr, NewUnmarshalError(err))
 			}
@@ -329,6 +329,39 @@ func detectStringStartingWithQuote(tokens token.Tokens) (outErrs []*sourcev1.Err
 				Context: errPrinter.PrintErrorToken(tok, false),
 			})
 		}
+	}
+
+	return outErrs
+}
+
+// detectUnquotedWildcard finds `*` tokens that YAML has lexed as an alias but that are not
+// followed by an alias name. Wildcards are used in policies, but a bare `*` is reserved by
+// YAML for aliases, so it has to be quoted. Without this, the user sees a bare YAML syntax
+// error such as "undefined alias name" or "mapping value is not allowed in this context".
+func detectUnquotedWildcard(tokens token.Tokens) (outErrs []*sourcev1.Error) {
+	var errPrinter printer.Printer
+	for _, tok := range tokens {
+		if tok.Type != token.AliasType || tok.Position == nil {
+			continue
+		}
+
+		// A genuine alias is always followed by the name of an anchor on the same line.
+		// The tokens that close a flow collection can never be that name, so a bare `*`
+		// immediately before one is still an unquoted wildcard.
+		if nxt := tok.Next; nxt != nil && nxt.Position != nil && nxt.Position.Line == tok.Position.Line &&
+			nxt.Type != token.SequenceEndType && nxt.Type != token.MappingEndType {
+			continue
+		}
+
+		outErrs = append(outErrs, &sourcev1.Error{
+			Kind:    sourcev1.Error_KIND_PARSE_ERROR,
+			Message: `invalid YAML wildcard: quote wildcards as "*" to use them as string values`,
+			Position: &sourcev1.Position{
+				Line:   uint32(tok.Position.Line),
+				Column: uint32(tok.Position.Column),
+			},
+			Context: errPrinter.PrintErrorToken(tok, false),
+		})
 	}
 
 	return outErrs

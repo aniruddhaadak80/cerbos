@@ -1,0 +1,17 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: default
+  resource: leave_request
+  variables:
+    - name: approved
+      init:
+        value: ["true", *]
+  rules:
+    - actions:
+        - approve
+      roles:
+        - user
+      condition:
+        match:
+          expr: request.resource.attr.variables.approved == "true"
+      effect: EFFECT_ALLOW

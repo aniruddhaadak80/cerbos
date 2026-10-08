@@ -1,0 +1,17 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: default
+  resource: leave_request
+  derivedRoles:
+    - name: owner
+      parentRoles:
+        - user
+      rules:
+        - action: *
+          effect: EFFECT_ALLOW
+  rules:
+    - actions:
+        - approve
+      roles:
+        - owner
+      effect: EFFECT_ALLOW
